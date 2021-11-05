@@ -4,58 +4,56 @@
 from datetime import datetime
 from datetime import timedelta
 
-from airflow.decorators import dag, task
+from airflow import DAG
 from airflow.providers.postgres.operators.postgres import PostgresOperator
 
 default_args = {
-    "owner" : "airflow",
-    "depends_on_past" : False,
-    "email" : ['redkin.zebrainy@gmail.com'],
-    "retries" : 3,
-    "retry_delay" : timedelta(minutes=5)
+    "owner": "airflow",
+    "depends_on_past": False,
+    "email": ['redkin.zebrainy@gmail.com'],
+    "retries": 3,
+    "retry_delay": timedelta(minutes=5)
 }
 
-@dag(default_args = default_args, schedule_interval=timedelta(hours=3),
-     start_date = datetime(2021, 6, 9), tags = ['skazbuka', 'postgresql'])
-def load_abtest_values():
-    @task
-    def extract_external_values() -> list:
-        postgres_conn_id = 'postgres_external',
-        sql = '''
-            SELECT * FROM sec.user_config;
+with DAG(
+    dag_id = "load_abtest_values",
+    start_date = datetime(2021, 7, 25),
+    schedule_interval = "@daily",
+    default_args = default_args,
+    catchup = False,
+    tags = ['skazbuka', 'postgresql']
+)as dag:
+
+    truncate = PostgresOperator(
+        task_id="truncate_users",
+        postgres_conn_id="postgres_internal",
+        sql="""
+            TRUNCATE TABLE amplitude.users;
+        """
+    )
+
+    insert = PostgresOperator(
+        task_id="insert_abtests",
+        postgres_conn_id="postgres_internal",
+        sql='''
+            INSERT INTO amplitude.users SELECT * FROM fdw_import.user_config;
         '''
-        result = sql
-        return result
+    )
 
-    @task()
-    def drop_internal_table():
-        postgres_conn_id = 'postgres_internal'
-        sql = '''
-            DROP TABLE IF EXISTS load.test_users;
+    analyze = PostgresOperator(
+        task_id="analyze_users",
+        postgres_conn_id="postgres_internal",
+        sql='''
+            ANALYZE amplitude.users;;
         '''
+    )
 
-    @task()
-    def create_internal_table():
-        postgres_conn_id = 'postgres_internal'
-        sql = '''
-            CREATE TABLE load.test_users(LIKE amplitude.users);
+    statinfo = PostgresOperator(
+        task_id="add_operation_info",
+        postgres_conn_id="postgres_internal",
+        sql='''
+            INSERT INTO airflow.operation_info (information) VALUES ($$Loading ABTests information$$);
         '''
+    )
 
-    @task
-    def populate_internal_table(abtests: list):
-        pass
-
-    @task()
-    def analyze_internal_table():
-        postgres_conn_id = 'postgres_internal'
-        sql = '''
-            ANALYZE TABLE load.test_users;
-        '''
-
-    abtests = extract_external_values()
-    drop_internal_table()
-    create_internal_table()
-    populate_internal_table(abtests)
-    analyze_internal_table()
-
-load_abtests_dag = load_abtest_values()
+    truncate >> insert >> analyze >> statinfo
